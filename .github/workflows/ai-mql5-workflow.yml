@@ -1,0 +1,24 @@
+name: AI MQL5 Power Team
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  actions: read
+  models: read
+
+jobs:
+  ai_review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v3
+
+      - name: AI Review with GitHub Models
+        run: |
+          curl "https://models.github.ai/inference/chat/completions" \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -d '{"messages":[{"role":"user","content":"راجع كود MQL5 ده وعدّل الأخطاء"}]}'
