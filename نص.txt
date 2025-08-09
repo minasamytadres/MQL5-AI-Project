@@ -1,0 +1,261 @@
+//+------------------------------------------------------------------+
+//|                        Ultra Smart Scalper EA - Modified         |
+//+------------------------------------------------------------------+
+#property strict
+#include <Trade/Trade.mqh>
+CTrade trade;
+
+//--- إعدادات المستخدم
+input double       RiskPercent        = 1.0;
+input int          StopLossPoints     = 300;
+input int          TakeProfitPoints   = 600;
+input ENUM_TIMEFRAMES TF              = PERIOD_M15;
+input int          FastMA             = 5;
+input int          SlowMA             = 20;
+
+//--- التريلينج ستوب
+input bool         EnableTrailingStop  = true;
+input int          TrailStartPoints    = 100;
+input int          TrailStepPoints     = 50;
+
+//--- إعدادات إضافية
+input double       LotMultiplier        = 1.5;
+input int          MaxTrades            = 20;
+input double       SuccessThreshold     = 50.0;
+
+//--- إعدادات مارتينجال
+input bool         UseMartingale        = true;
+input double       MartingaleMultiplier = 2.0;
+double             LastTradeResult      = 0.0;
+
+//--- رأس المال المحمي
+double ProtectedCapital = 0.0;
+bool InitializedCapital = false;
+
+//--- هيكل الذاكرة
+struct TradeMemory
+{
+  string direction;
+  double fastMA;
+  double slowMA;
+  double result;
+};
+TradeMemory memoryBuffer[];
+
+//--- مقابض المؤشرات
+int fastHandle = INVALID_HANDLE;
+int slowHandle = INVALID_HANDLE;
+
+//--- حساب نسبة نجاح الإشارة
+double GetSignalSuccessRate(string dir, double fastMA, double slowMA)
+{
+  int total = 0, success = 0;
+  for(int i = 0; i < ArraySize(memoryBuffer); i++)
+  {
+    if(memoryBuffer[i].direction == dir &&
+       MathAbs(memoryBuffer[i].fastMA - fastMA) < 1.0 &&
+       MathAbs(memoryBuffer[i].slowMA - slowMA) < 1.0)
+    {
+      total++;
+      if(memoryBuffer[i].result > 0) success++;
+    }
+  }
+  if(total < 1) return 50.0; // مؤقتًا يعتبر نجاح مبدئي
+  return (success * 100.0 / total);
+}
+
+//--- حساب اللوت حسب الربح المحقق
+double CalcLotSize(double stopLossPoints, double successRate)
+{
+  double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+
+  if(!InitializedCapital)
+  {
+    ProtectedCapital = balance * 0.9;
+    InitializedCapital = true;
+    Print("🔐 رأس المال المحمي المبدئي: ", ProtectedCapital);
+  }
+
+  double freeProfit = balance - ProtectedCapital;
+
+  if(freeProfit <= 0)
+  {
+    Print("⚠️ لا يوجد أرباح حالياً. التداول باستخدام رأس المال الأساسي.");
+    freeProfit = balance * RiskPercent / 100.0;
+  }
+
+  double risk       = freeProfit * RiskPercent / 100.0;
+  double tickValue  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+  double tickSize   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+  double slValue    = stopLossPoints * tickValue / tickSize;
+  double lot        = risk / slValue;
+
+  if(successRate >= SuccessThreshold)
+    lot *= LotMultiplier;
+  else if(UseMartingale && LastTradeResult < 0)
+    lot *= MartingaleMultiplier;
+
+  double volumeStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+  int digits = (int)MathRound(-MathLog10(volumeStep));
+  lot = NormalizeDouble(lot, digits);
+
+  double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+  double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+
+  if(lot < minLot) lot = minLot;
+
+  return MathMin(lot, maxLot);
+}
+
+//--- عدّ الصفقات المفتوحة من نوع معين
+int CountPositions(int type)
+{
+  int count = 0;
+  for(int i = 0; i < PositionsTotal(); i++)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if(PositionSelectByTicket(ticket) &&
+       PositionGetString(POSITION_SYMBOL) == _Symbol &&
+       PositionGetInteger(POSITION_TYPE) == type)
+      count++;
+  }
+  return count;
+}
+
+//--- تسجيل الصفقة
+void RecordTrade(string dir, double fma, double sma, double result)
+{
+  TradeMemory mem;
+  mem.direction = dir;
+  mem.fastMA = fma;
+  mem.slowMA = sma;
+  mem.result = result;
+  ArrayResize(memoryBuffer, ArraySize(memoryBuffer) + 1);
+  memoryBuffer[ArraySize(memoryBuffer) - 1] = mem;
+
+  LastTradeResult = result;
+}
+
+//--- التريلينج ستوب
+void ManageTrailingStop()
+{
+  if(!EnableTrailingStop) return;
+
+  for(int i = 0; i < PositionsTotal(); i++)
+  {
+    ulong ticket = PositionGetTicket(i);
+    if(!PositionSelectByTicket(ticket)) continue;
+    if(PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+
+    long type = PositionGetInteger(POSITION_TYPE);
+    double entry = PositionGetDouble(POSITION_PRICE_OPEN);
+    double sl = PositionGetDouble(POSITION_SL);
+    double price = (type == POSITION_TYPE_BUY) ? SymbolInfoDouble(_Symbol, SYMBOL_BID)
+                                               : SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double profit = (type == POSITION_TYPE_BUY) ? (price - entry) / _Point
+                                                : (entry - price) / _Point;
+
+    if(profit < TrailStartPoints) continue;
+
+    double newSL = (type == POSITION_TYPE_BUY) ? price - TrailStepPoints * _Point
+                                               : price + TrailStepPoints * _Point;
+
+    if(type == POSITION_TYPE_BUY && sl < newSL)
+      trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+    else if(type == POSITION_TYPE_SELL && (sl > newSL || sl == 0.0))
+      trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+  }
+}
+
+//--- فتح صفقة شراء
+void OpenBuy(double fma, double sma)
+{
+  if(CountPositions(POSITION_TYPE_BUY) >= MaxTrades) return;
+
+  double success = GetSignalSuccessRate("buy", fma, sma);
+  double lot = CalcLotSize(StopLossPoints, success);
+  if(lot <= 0.0) return;
+
+  double price = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+  double sl = price - StopLossPoints * _Point;
+  double tp = price + TakeProfitPoints * _Point;
+  trade.Buy(lot, _Symbol, price, sl, tp);
+}
+
+//--- فتح صفقة بيع
+void OpenSell(double fma, double sma)
+{
+  if(CountPositions(POSITION_TYPE_SELL) >= MaxTrades) return;
+
+  double success = GetSignalSuccessRate("sell", fma, sma);
+  double lot = CalcLotSize(StopLossPoints, success);
+  if(lot <= 0.0) return;
+
+  double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+  double sl = price + StopLossPoints * _Point;
+  double tp = price - TakeProfitPoints * _Point;
+  trade.Sell(lot, _Symbol, price, sl, tp);
+}
+
+//--- التهيئة
+int OnInit()
+{
+  fastHandle = iMA(_Symbol, TF, FastMA, 0, MODE_EMA, PRICE_CLOSE);
+  slowHandle = iMA(_Symbol, TF, SlowMA, 0, MODE_EMA, PRICE_CLOSE);
+
+  if(fastHandle == INVALID_HANDLE || slowHandle == INVALID_HANDLE)
+  {
+    Print("⚠️ خطأ في إنشاء المؤشرات");
+    return INIT_FAILED;
+  }
+
+  Print("✅ تشغيل Ultra Smart Scalper على ", _Symbol);
+  return INIT_SUCCEEDED;
+}
+
+//--- إنهاء التشغيل
+void OnDeinit(const int reason)
+{
+  if(fastHandle != INVALID_HANDLE) IndicatorRelease(fastHandle);
+  if(slowHandle != INVALID_HANDLE) IndicatorRelease(slowHandle);
+  Print("🛑 تم الإيقاف، السبب: ", reason);
+}
+
+//--- تنفيذ كل تيك
+void OnTick()
+{
+  ManageTrailingStop();
+
+  double fastArr[1], slowArr[1];
+  if(CopyBuffer(fastHandle, 0, 0, 1, fastArr) != 1 ||
+     CopyBuffer(slowHandle, 0, 0, 1, slowArr) != 1)
+    return;
+
+  double fast = fastArr[0];
+  double slow = slowArr[0];
+
+  if(fast > slow)
+    OpenBuy(fast, slow);
+  else if(fast < slow)
+    OpenSell(fast, slow);
+}
+
+//--- تسجيل الصفقات المغلقة
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                        const MqlTradeRequest& request,
+                        const MqlTradeResult& result)
+{
+  if(trans.type == TRADE_TRANSACTION_DEAL_ADD &&
+     (trans.deal_type == DEAL_TYPE_BUY || trans.deal_type == DEAL_TYPE_SELL))
+  {
+    double fastArr[1], slowArr[1];
+    if(CopyBuffer(fastHandle, 0, 0, 1, fastArr) != 1 ||
+       CopyBuffer(slowHandle, 0, 0, 1, slowArr) != 1)
+      return;
+
+    double profit = HistoryDealGetDouble(trans.deal, DEAL_PROFIT);
+    string dir = (trans.deal_type == DEAL_TYPE_BUY) ? "buy" : "sell";
+    RecordTrade(dir, fastArr[0], slowArr[0], profit);
+  }
+}
+
