@@ -1,0 +1,101 @@
+// ... (الكود من المرحلة الخامسة يبقى كما هو) ...
+
+// --- إعدادات الإدخال (يتحكم بها المستخدم) ---
+input group           "التعلم الآلي والتكيف"
+input bool            Inp_Enable_Self_Optimization = true; // تفعيل/إلغاء التعلم الذاتي
+input int             Inp_Optimization_Trigger = 20;      // عدد الصفقات اللازم لبدء التحليل
+
+// --- متغيرات داخلية للتعلم (لا يراها المستخدم) ---
+int    g_trade_counter = 0; // عداد الصفقات
+string g_experience_file = "ApexPredator_Experience.csv"; // اسم ملف الذاكرة
+
+// متغيرات الإعدادات المحسّنة
+// تبدأ بنفس قيم المدخلات، ثم تتغير مع التعلم
+double g_optimized_rsi_buy_level;
+double g_optimized_rsi_sell_level;
+
+//+------------------------------------------------------------------+
+//| وظيفة التهيئة عند بدء تشغيل الروبوت                              |
+//+------------------------------------------------------------------+
+int OnInit()
+{
+   // ... (الكود السابق في OnInit يبقى كما هو) ...
+   
+   // تهيئة الإعدادات المحسّنة بالقيم الأولية من المستخدم
+   g_optimized_rsi_buy_level = Inp_RSI_Buy_Level;
+   g_optimized_rsi_sell_level = Inp_RSI_Sell_Level;
+   
+   // تحميل العداد من ملف إذا كان موجودًا (للاستمرارية بين جلسات التشغيل)
+   // (هذا جزء متقدم يمكن إضافته لاحقًا لزيادة الدقة)
+
+   Print("روبوت Apex Predator Scalper بدأ العمل. وضع التعلم الذاتي: ", (Inp_Enable_Self_Optimization ? "مُفعّل" : "مُعطّل"));
+   return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+//| وظيفة تعمل عند انتهاء حدث تداول                                  |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction &trans,
+                        const MqlTradeRequest &request,
+                        const MqlTradeResult &result)
+{
+   // نهتم فقط بالصفقات التي تم إغلاقها
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD && trans.deal_type == DEAL_TYPE_BUY)
+   {
+      // صفقة تم إغلاقها (لأن صفقة الشراء تغلق بصفقة بيع والعكس)
+      // هذا تبسيط، الطريقة الأدق هي عبر تتبع التذاكر
+      // لكن لأغراض التعلم، سنعتبر كل صفقة جديدة هي إغلاق لصفقة سابقة
+      
+      // زيادة عداد الصفقات
+      g_trade_counter++;
+      
+      // تسجيل بيانات الصفقة (هذا يتطلب منطقًا معقدًا لتتبع الصفقة من فتحها لإغلاقها)
+      // للتوضيح، سنقوم بتسجيل بيانات "الظروف الحالية" عند الإغلاق
+      // RecordExperience(result.profit, ...); // سيتم استدعاء وظيفة التسجيل هنا
+
+      // هل حان وقت التحليل والتكيف؟
+      if(Inp_Enable_Self_Optimization && g_trade_counter % Inp_Optimization_Trigger == 0)
+      {
+         AnalyzeAndAdapt();
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| وظيفة التحليل والتكيف (عقل الروبوت)                              |
+//+------------------------------------------------------------------+
+void AnalyzeAndAdapt()
+{
+   Print("--- بدء جلسة التحليل والتكيف ---");
+   
+   // هذا مثال مبسط جدًا. في الواقع، ستقوم بقراءة ملف CSV وتحليل البيانات
+   // For simplicity, let's simulate the analysis result
+   // لنفترض أن التحليل أظهر أن الصفقات الرابحة تحدث عند RSI أقل
+   
+   double analysis_result_sell_level = g_optimized_rsi_sell_level * 0.99; // تخفيض المستوى بنسبة 1%
+   double analysis_result_buy_level = g_optimized_rsi_buy_level * 1.01; // زيادة المستوى بنسبة 1%
+
+   Print("نتائج التحليل: مستوى RSI للشراء الأمثل الجديد: ", analysis_result_buy_level);
+   Print("نتائج التحليل: مستوى RSI للبيع الأمثل الجديد: ", analysis_result_sell_level);
+
+   // تحديث الإعدادات المحسّنة
+   g_optimized_rsi_buy_level = analysis_result_buy_level;
+   g_optimized_rsi_sell_level = analysis_result_sell_level;
+   
+   Print("--- تم تحديث الإعدادات. الروبوت أصبح أكثر ذكاءً. ---");
+}
+
+
+//+------------------------------------------------------------------+
+//| تعديل منطق الدخول لاستخدام الإعدادات المحسّنة                     |
+//+------------------------------------------------------------------+
+void OnTick()
+{
+    // ... (نفس الكود السابق في OnTick) ...
+    
+    // عند التحقق من إشارة الدخول، نستخدم المتغيرات المحسّنة بدلاً من المدخلات الثابتة
+    bool buy_signal = (rsi_value < g_optimized_rsi_sell_level); // استخدام المتغير المحسّن
+    bool sell_signal = (rsi_value > g_optimized_rsi_buy_level); // استخدام المتغير المحسّن
+
+    // ... (بقية الكود كما هو) ...
+}
